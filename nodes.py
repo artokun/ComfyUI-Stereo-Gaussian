@@ -43,13 +43,20 @@ class StereoGaussianRender:
                     "forceInput": True,
                     "tooltip": "Path to Gaussian Splatting PLY file (from SHARP Predict)",
                 }),
-                "intrinsics": ("INTRINSICS", {
-                    "tooltip": "3x3 camera intrinsics matrix from SHARP Predict",
-                }),
             },
             "optional": {
+                "intrinsics": ("INTRINSICS", {
+                    "tooltip": "3x3 camera intrinsics matrix from SHARP Predict. If not connected, uses focal_length_mm.",
+                }),
                 "extrinsics": ("EXTRINSICS", {
                     "tooltip": "4x4 camera extrinsics matrix. Default: identity (SHARP default)",
+                }),
+                "focal_length_mm": ("FLOAT", {
+                    "default": 30.0,
+                    "min": 1.0,
+                    "max": 500.0,
+                    "step": 0.1,
+                    "tooltip": "Focal length in mm (35mm film equiv). Used when intrinsics is not connected.",
                 }),
                 "ipd_mm": ("FLOAT", {
                     "default": 63.0,
@@ -93,13 +100,28 @@ class StereoGaussianRender:
         "Deletes PLY after rendering to save disk space."
     )
 
+    @staticmethod
+    def _compute_intrinsics(focal_length_mm: float, width: int, height: int) -> list[list[float]]:
+        """Compute 3x3 intrinsics from focal length (mm) and render dimensions.
+
+        Uses 35mm film equivalence: f_px = f_mm * diag_px / sensor_diag_mm.
+        """
+        import math
+        sensor_diag_mm = math.sqrt(36**2 + 24**2)  # ~43.27mm (35mm film)
+        image_diag_px = math.sqrt(width**2 + height**2)
+        f_px = focal_length_mm * image_diag_px / sensor_diag_mm
+        cx = width / 2.0
+        cy = height / 2.0
+        return [[f_px, 0, cx], [0, f_px, cy], [0, 0, 1]]
+
     @torch.no_grad()
     def render_stereo(
         self,
         image: torch.Tensor,
         ply_path: str,
-        intrinsics: list[list[float]],
+        intrinsics: list[list[float]] | None = None,
         extrinsics: list[list[float]] | None = None,
+        focal_length_mm: float = 30.0,
         ipd_mm: float = 63.0,
         image_width: int = 1024,
         image_height: int = 1024,
@@ -115,6 +137,14 @@ class StereoGaussianRender:
                 "The gsplat rasterizer does not support CPU or MPS."
             )
         device = "cuda"
+
+        # Build intrinsics: prefer linked INTRINSICS, fall back to focal_length_mm
+        if intrinsics is None:
+            intrinsics = self._compute_intrinsics(focal_length_mm, image_width, image_height)
+            print(
+                f"[StereoGaussianRender] Built intrinsics from focal_length_mm={focal_length_mm:.1f} "
+                f"-> f_px={intrinsics[0][0]:.1f}, cx={intrinsics[0][2]:.1f}, cy={intrinsics[1][2]:.1f}"
+            )
 
         ply_size_mb = Path(ply_path).stat().st_size / (1024 * 1024)
         print(f"[StereoGaussianRender] Loading PLY: {ply_path} ({ply_size_mb:.1f}MB)")
